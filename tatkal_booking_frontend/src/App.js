@@ -10,245 +10,214 @@ const COLORS = {
   secondary: "#ffffff",
   accent: "#ffab00",
   error: "#d32f2f",
-  success: "#388e3c"
+  success: "#388e3c",
 };
 
-// Utility for API requests (handles simple GET/POST)
-async function apiFetch(endpoint, { method = "GET", body, headers = {} } = {}) {
+function apiFetch(endpoint, { method = "GET", body, headers = {} } = {}) {
   let opts = {
     method,
     headers: {
       "Content-Type": "application/json",
-      ...headers
-    }
+      ...headers,
+    },
   };
   if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(`${API_BASE}${endpoint}`, opts);
-  const contentType = res.headers.get("content-type");
-  if (!res.ok) throw new Error(await res.text());
-  if (contentType && contentType.indexOf("application/json") !== -1) {
-    return await res.json();
-  }
-  return await res.text();
+  return fetch(`${API_BASE}${endpoint}`, opts).then(async (res) => {
+    const contentType = res.headers.get("content-type");
+    if (!res.ok) throw new Error(await res.text());
+    if (contentType && contentType.indexOf("application/json") !== -1) {
+      return await res.json();
+    }
+    return await res.text();
+  });
 }
 
-/** PUBLIC_INTERFACE
- * Main Tatkal Booking SPA
+/**
+ * PUBLIC_INTERFACE
+ * Main App: Registration -> Booking -> QuickPay
  */
 function App() {
-  // Theme mode
+  // Theme and UI state
   const [theme, setTheme] = useState("light");
-  // Sidebar: saved user profiles
+  const [registered, setRegistered] = useState(false);
+  const [userProfile, setUserProfile] = useState(null);
   const [profiles, setProfiles] = useState([]);
-  // Currently selected profile
-  const [selectedProfile, setSelectedProfile] = useState(null);
-  // Booking form state
-  const [form, setForm] = useState({
-    user_profile_id: "",
-    train_no: "",
-    journey_date: "",
-    from_station: "",
-    to_station: "",
-    passenger_name: "",
-    passenger_age: "",
-    passenger_sex: ""
-  });
-  // UI loading & error states
-  const [loading, setLoading] = useState(false);
-  const [bookingStatus, setBookingStatus] = useState(null);
-  const [bookingId, setBookingId] = useState(null);
   const [error, setError] = useState(null);
-  // Payment
+  const [booking, setBooking] = useState(null);
+  const [bookingStatus, setBookingStatus] = useState(null);
   const [paymentStatus, setPaymentStatus] = useState(null);
   const [paymentLink, setPaymentLink] = useState(null);
+  const [wallet, setWallet] = useState(0);
+
+  // Registration/Booking form states
+  const [registrationForm, setRegistrationForm] = useState({
+    full_name: "",
+    age: "",
+    address: "",
+    preferred_berth: "",
+    phone: "",
+  });
+  const [bookingForm, setBookingForm] = useState({
+    from: "",
+    to: "",
+    journey_date: "",
+    preferred_berth: "",
+  });
 
   // Theme effect
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
 
-  // Fetch saved profiles on mount
+  // On load: try load local user or fetch profiles
   useEffect(() => {
     fetchProfiles();
+    const user = localStorage.getItem("tatkal_user_profile");
+    if (user) {
+      setUserProfile(JSON.parse(user));
+      setRegistered(true);
+      setWallet(Number(localStorage.getItem("tatkal_wallet") || 0));
+    }
   }, []);
 
-  async function fetchProfiles() {
-    try {
-      setError(null);
-      const result = await apiFetch("/user_profiles/");
-      setProfiles(Array.isArray(result) ? result : []);
-    } catch (err) {
-      setError("Failed to load profiles.");
-      setProfiles([]);
-    }
+  function fetchProfiles() {
+    apiFetch("/user_profiles/")
+      .then((result) => setProfiles(Array.isArray(result) ? result : []))
+      .catch(() => setProfiles([]));
   }
 
-  // When user selects a profile: auto-fill booking form fields
-  async function handleProfileSelect(profile) {
-    setSelectedProfile(profile);
-    setForm((prev) => ({
-      ...prev,
-      user_profile_id: profile.id,
-      passenger_name: profile.full_name || "",
-      passenger_age: profile.age || "",
-      passenger_sex: profile.gender || "",
-    }));
-    // Optionally, fetch auto-fill details from backend
-    try {
-      const autofill = await apiFetch(`/auto_fill/${profile.id}/`);
-      setForm((prev) => ({
-        ...prev,
-        ...autofill
-      }));
-    } catch (err) {
-      /* ignore autofill error */
-    }
-  }
-
-  // Handle booking form input changes
-  function onFormChange(e) {
-    const { name, value } = e.target;
-    setForm((prev) => ({ ...prev, [name]: value }));
-  }
-
+  // Registration submit
   // PUBLIC_INTERFACE
-  // Booking form submit
-  async function submitBooking(e) {
+  async function handleRegistration(e) {
     e.preventDefault();
-    setLoading(true);
+    setError(null);
+    // Save profile to backend (for demo: skip password)
+    try {
+      const resp = await apiFetch("/user_profiles/", {
+        method: "POST",
+        body: {
+          username: registrationForm.full_name.replace(/\s+/g, "_").toLowerCase() + "_" + Math.floor(Math.random() * 10000),
+          password: registrationForm.full_name + Date.now(),
+          full_name: registrationForm.full_name,
+          age: registrationForm.age,
+          phone: registrationForm.phone,
+          preferred_payment_mode: "wallet",
+          auto_fill_enabled: true,
+          address: registrationForm.address,
+          preferred_berth: registrationForm.preferred_berth,
+        },
+      });
+      // Persist locally
+      setUserProfile(resp);
+      setRegistered(true);
+      localStorage.setItem("tatkal_user_profile", JSON.stringify(resp));
+      if (!localStorage.getItem("tatkal_wallet")) {
+        localStorage.setItem("tatkal_wallet", "1000");
+      }
+      setWallet(Number(localStorage.getItem("tatkal_wallet")));
+    } catch (err) {
+      setError("Registration failed: " + String(err));
+    }
+  }
+
+  // Booking form submit
+  // PUBLIC_INTERFACE
+  async function handleBooking(e) {
+    e.preventDefault();
     setError(null);
     setBookingStatus("initiating");
     setPaymentStatus(null);
+    setBooking(null);
     setPaymentLink(null);
+
+    // Compose booking payload
+    const payload = {
+      user_profile_id: userProfile.id || userProfile.user_profile_id,
+      passenger_name: userProfile.full_name,
+      passenger_age: userProfile.age,
+      passenger_sex: "U", // Not provided in registration; could be added if needed
+      preferred_berth: bookingForm.preferred_berth,
+      address: userProfile.address,
+      from_station: bookingForm.from,
+      to_station: bookingForm.to,
+      journey_date: bookingForm.journey_date,
+    };
+
     try {
+      // Backend expects POST /bookings/ (no train_no!)
       const bookingRes = await apiFetch("/bookings/", {
         method: "POST",
-        body: {
-          ...form
-        }
+        body: payload,
       });
-      const id = bookingRes.id || bookingRes.booking_id; // depends on backend
-      setBookingId(id);
+      setBooking(bookingRes);
       setBookingStatus("initiated");
-      // Poll status
-      pollBookingStatus(id);
+      if (wallet < 500) {
+        setPaymentStatus("insufficient_wallet");
+        setError("Insufficient wallet balance. Please deposit.");
+      } else {
+        setTimeout(() => handleQuickPay(bookingRes), 800);
+      }
     } catch (err) {
       setError("Booking failed: " + String(err));
       setBookingStatus("failed");
     }
-    setLoading(false);
   }
 
-  // Poll booking status until processed
-  async function pollBookingStatus(id) {
-    setBookingStatus("checking");
-    let done = false;
-    let loopCount = 0;
-    while (!done && loopCount < 12) { // about 24s max
-      await new Promise((r) => setTimeout(r, 2000));
-      try {
-        const statusRes = await apiFetch(`/bookings/${id}/`);
-        const status = statusRes.status || statusRes.booking_status;
-        setBookingStatus(status);
-        if (status === "booked" || status === "failed" || status === "cancelled") {
-          done = true;
-          return;
-        }
-        if (status === "payment_pending" || status === "initiated") {
-          // Payment flow
-          if (!paymentLink) {
-            await initiatePayment(id);
-          }
-        }
-        loopCount++;
-      } catch (err) {
-        setError("Error fetching booking status");
-        done = true;
+  // PUBLIC_INTERFACE
+  // Handle wallet deposit
+  function handleDeposit(amt) {
+    const newWallet = wallet + amt;
+    setWallet(newWallet);
+    localStorage.setItem("tatkal_wallet", String(newWallet));
+  }
+
+  // PUBLIC_INTERFACE
+  // Handle Quick Pay (auto debit on booking)
+  async function handleQuickPay(bookingObj) {
+    try {
+      setPaymentStatus("processing");
+      // Simulate payment (auto debit wallet)
+      const paymentAmount = 500;
+      if (wallet < paymentAmount) {
+        setError("Insufficient wallet balance for Quick Pay.");
+        setPaymentStatus("failed");
+        return;
       }
-    }
-  }
+      // Deduct from local wallet
+      const newWallet = wallet - paymentAmount;
+      setWallet(newWallet);
+      localStorage.setItem("tatkal_wallet", String(newWallet));
 
-  // PUBLIC_INTERFACE
-  // Payment initiation (Razorpay placeholder)
-  async function initiatePayment(booking_id) {
-    setPaymentStatus("initiating");
-    try {
-      const paymentResp = await apiFetch("/payment/initiate/", {
-        method: "POST",
-        body: {
-          booking_id,
-          amount: 500 // Placeholder, could fetch from profile/session
-        }
-      });
-      setPaymentLink(paymentResp.payment_link || "#");
-      setPaymentStatus("pending");
-      // Normally, would open Razorpay widget or link here
-    } catch (err) {
-      setPaymentStatus("failed");
-      setError("Failed to initiate payment: " + String(err));
-    }
-  }
-
-  // PUBLIC_INTERFACE
-  // Simulate payment completion callback (for Razorpay demo)
-  async function mockPaymentSuccess() {
-    setPaymentStatus("processing");
-    // In real app, a Razorpay widget would call backend or trigger callback
-    try {
-      // Mocked payment callback (simulate payment_id/tx)
+      // Mock callback POST
       await apiFetch("/payment/callback/", {
         method: "POST",
         body: {
-          payment_transaction_id: "mock1234",
-          payment_id: "mock5678",
-          status: "success"
-        }
+          payment_transaction_id: "wallet_tx_" + Date.now(),
+          payment_id: "wallet_pay_" + Date.now(),
+          status: "success",
+        },
       });
       setPaymentStatus("success");
       setBookingStatus("booked");
     } catch (err) {
-      setError("Payment callback failed.");
+      setError("Quick Pay failed: " + String(err));
       setPaymentStatus("failed");
     }
   }
 
-  /** PUBLIC_INTERFACE
-   * Add a new user profile and refresh sidebar
-   */
-  async function handleProfileAdd(profileData) {
-    try {
-      await apiFetch("/user_profiles/", {
-        method: "POST",
-        body: profileData
-      });
-      fetchProfiles();
-    } catch (err) {
-      setError("Failed to add new profile.");
-    }
-  }
-
-  // PUBLIC_INTERFACE
-  // Handle form reset
-  function resetForm() {
-    setForm({
-      user_profile_id: "",
-      train_no: "",
-      journey_date: "",
-      from_station: "",
-      to_station: "",
-      passenger_name: "",
-      passenger_age: "",
-      passenger_sex: ""
-    });
-    setSelectedProfile(null);
+  // Reset state and forms
+  function resetAll() {
+    setRegistered(false);
+    setUserProfile(null);
+    localStorage.removeItem("tatkal_user_profile");
+    setBooking(null);
     setBookingStatus(null);
-    setBookingId(null);
     setPaymentStatus(null);
     setPaymentLink(null);
     setError(null);
   }
 
-  // Layout: Header + main + sidebar
+  // Layout: Registration -> Booking -> Status+QuickPay
   return (
     <div className="App" style={{ minHeight: "100vh", background: "var(--bg-primary)" }}>
       {/* Fixed header */}
@@ -288,252 +257,261 @@ function App() {
         </button>
       </header>
 
-      {/* Container */}
-      <div style={{
-        display: "flex",
-        marginTop: 70,
-        minHeight: "80vh"
-      }}>
-        {/* Sidebar: Profiles */}
-        <aside style={{
-          background: "var(--bg-secondary)",
-          minWidth: 240,
-          padding: "2rem 1rem",
-          borderRight: "1px solid var(--border-color)",
-        }}>
-          <h2 style={{ fontSize: 18, margin: "0 0 1rem 0" }}>Saved Profiles</h2>
-          <ProfilesSidebar
-            profiles={profiles}
-            selectedProfile={selectedProfile}
-            onSelect={handleProfileSelect}
-            onAdd={handleProfileAdd}
-          />
-        </aside>
-        {/* Main content: Booking form, status, feedback */}
-        <main style={{
-          flex: 1,
-          padding: "2rem",
-          maxWidth: 720,
-          margin: "auto"
-        }}>
-          <h1 style={{
-            fontSize: 28,
-            fontWeight: 800,
-            color: COLORS.primary,
+      <main style={{ marginTop: 80, maxWidth: 500, marginLeft: "auto", marginRight: "auto", padding: "2rem 1rem" }}>
+        <h1 style={{
+          fontSize: 28,
+          fontWeight: 800,
+          color: COLORS.primary,
+          marginBottom: 18,
+          letterSpacing: 1
+        }}>Tatkal Ticket Booking</h1>
+        <div style={{ marginBottom: 12, color: COLORS.secondary }}>
+          Book lightning fast. <span style={{ color: COLORS.accent, marginLeft: 6 }}>Auto-fill, One-click Pay, No train number required!</span>
+        </div>
+        {/* Show registration or booking */}
+        {error && (
+          <div style={{
+            background: COLORS.error,
+            color: "#fff",
+            padding: 12,
+            borderRadius: 8,
             marginBottom: 18,
-            letterSpacing: 1
-          }}>Tatkal Ticket Booking</h1>
-          <div style={{ marginBottom: 24, color: COLORS.secondary}}>
-            Book lightning fast using profiles. <a href="https://www.irctc.co.in/nget/train-search" target="_blank" rel="noreferrer" style={{ color: COLORS.accent }}>IRCTC Reference</a>
-          </div>
-          {error && (
-            <div style={{
-              background: COLORS.error,
-              color: "#fff",
-              padding: 12,
-              borderRadius: 8,
-              marginBottom: 18,
-            }}>{error}</div>
-          )}
-          <BookingForm
-            form={form}
-            setForm={setForm}
-            onFormChange={onFormChange}
-            onSubmit={submitBooking}
-            disabled={loading || (bookingStatus && ["initiated", "booked", "payment_pending", "checking"].includes(bookingStatus))}
-            resetForm={resetForm}
+          }}>{error}</div>
+        )}
+
+        {!registered ? (
+          <RegistrationForm
+            registrationForm={registrationForm}
+            setRegistrationForm={setRegistrationForm}
+            onSubmit={handleRegistration}
           />
-          <StatusCard
-            bookingStatus={bookingStatus}
-            paymentStatus={paymentStatus}
-            paymentLink={paymentLink}
-            onMockPayment={mockPaymentSuccess}
-            bookingId={bookingId}
-          />
-        </main>
-      </div>
-      {/* Footer */}
+        ) : (
+          <>
+            <ProfileCard userProfile={userProfile} wallet={wallet} onReset={resetAll} onDeposit={handleDeposit} />
+            {!bookingStatus || bookingStatus === "failed" ? (
+              <BookingForm
+                bookingForm={bookingForm}
+                setBookingForm={setBookingForm}
+                onSubmit={handleBooking}
+              />
+            ) : null}
+            <StatusCard
+              bookingStatus={bookingStatus}
+              paymentStatus={paymentStatus}
+              booking={booking}
+              paymentLink={paymentLink}
+              wallet={wallet}
+              onDeposit={handleDeposit}
+              onQuickPay={() => handleQuickPay(booking)}
+            />
+          </>
+        )}
+      </main>
       <footer style={{
         padding: 18,
         textAlign: "center",
         color: "#aaa",
         fontSize: 14
       }}>
-        &copy; {new Date().getFullYear()} QuickBook Tatkal. Made for speed and ease 🚄
+        &copy; {new Date().getFullYear()} QuickBook Tatkal. Registration &rarr; Booking &rarr; QuickPay 🚄
       </footer>
     </div>
   );
 }
 
-/** PUBLIC_INTERFACE
- * Sidebar showing user profiles and a simple add form
+/**
+ * PUBLIC_INTERFACE
+ * Registration form (name, age, address, preferred berth)
  */
-function ProfilesSidebar({ profiles, selectedProfile, onSelect, onAdd }) {
-  const [adding, setAdding] = useState(false);
-  const [newProfile, setNewProfile] = useState({
-    username: "", password: "", full_name: "", age: "", phone: "",
-    preferred_payment_mode: "", auto_fill_enabled: true
-  });
-
+function RegistrationForm({ registrationForm, setRegistrationForm, onSubmit }) {
   function handleChange(e) {
     const { name, value } = e.target;
-    setNewProfile(prev => ({ ...prev, [name]: value }));
+    setRegistrationForm((prev) => ({ ...prev, [name]: value }));
   }
-  async function handleSubmit(e) {
-    e.preventDefault();
-    await onAdd(newProfile);
-    setAdding(false);
-    setNewProfile({ username: "", password: "", full_name: "", age: "", phone: "", preferred_payment_mode: "", auto_fill_enabled: true });
-  }
-  return (
-    <div>
-      <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-        {profiles.map((profile) => (
-          <li key={profile.id} style={{ marginBottom: 16 }}>
-            <button
-              onClick={() => onSelect(profile)}
-              style={{
-                width: "100%", padding: 10, background: profile === selectedProfile ? "#e3f2fd" : "var(--bg-primary)",
-                border: profile === selectedProfile ? `2px solid ${COLORS.primary}` : "1px solid #ccc",
-                borderRadius: 6, textAlign: "left", cursor: "pointer"
-              }}>
-              <strong>{profile.full_name}</strong>
-              <br />
-              <span style={{ fontSize: 12, color: "#aaa" }}>{profile.username} | {profile.preferred_payment_mode}</span>
-            </button>
-          </li>
-        ))}
-      </ul>
-      {!adding && <button
-        className="btn"
-        style={{
-          background: COLORS.primary, color: "#fff", border: "none",
-          marginTop: 12, borderRadius: 6, padding: "10px 16px", width: "100%", fontWeight: "600"
-        }}
-        onClick={() => setAdding(true)}
-      >+ Add Profile</button>}
-      {adding && (
-        <form onSubmit={handleSubmit} style={{ marginTop: 18, background: "#f5f5f5", borderRadius: 8, padding: 12 }}>
-          <input name="full_name" placeholder="Full name" required value={newProfile.full_name} onChange={handleChange} style={inputStyle} />
-          <input name="username" placeholder="Username" required value={newProfile.username} onChange={handleChange} style={inputStyle} />
-          <input name="password" type="password" placeholder="Password" required value={newProfile.password} onChange={handleChange} style={inputStyle} />
-          <input name="age" placeholder="Age" type="number" min={1} max={120} required value={newProfile.age} onChange={handleChange} style={inputStyle} />
-          <input name="phone" placeholder="Phone" required value={newProfile.phone} onChange={handleChange} style={inputStyle} />
-          <input name="preferred_payment_mode" placeholder="Payment Mode" required value={newProfile.preferred_payment_mode} onChange={handleChange} style={inputStyle} />
-          <label style={{ fontSize: 12, margin: "4px 0" }}>
-            <input type="checkbox" name="auto_fill_enabled" checked={newProfile.auto_fill_enabled} onChange={e => setNewProfile(prev => ({ ...prev, auto_fill_enabled: e.target.checked }))} />
-            {" "}Enable Auto-Fill
-          </label>
-          <div style={{ marginTop: 6 }}>
-            <button type="submit" style={{ ...inputStyle, background: COLORS.accent, color: COLORS.primary, fontWeight: 700, marginRight: 6 }}>Save</button>
-            <button type="button" style={{ ...inputStyle, background: "#eee", color: "#4a4a4a" }} onClick={() => setAdding(false)}>Cancel</button>
-          </div>
-        </form>
-      )}
-    </div>
-  );
-}
-
-/** PUBLIC_INTERFACE
- * Main Booking Form UI
- */
-function BookingForm({ form, onFormChange, onSubmit, disabled, resetForm }) {
   return (
     <form onSubmit={onSubmit} style={{
       background: "var(--bg-secondary)",
-      borderRadius: 10,
-      padding: "1.5rem 1.5rem 1rem 1.5rem",
-      marginBottom: 22,
-      boxShadow: "0 2px 10px rgba(30,20,50,0.07)"
+      borderRadius: 8,
+      padding: "1.5rem 1rem",
+      marginBottom: 20,
+      boxShadow: "0 2px 8px rgba(30,20,50,0.07)"
     }}>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 10 }}>
-        <div>
-          <label style={labelStyle}>Train Number</label>
-          <input type="text" name="train_no" value={form.train_no} onChange={onFormChange} required style={inputStyle} disabled={disabled} />
-        </div>
-        <div>
-          <label style={labelStyle}>Journey Date</label>
-          <input type="date" name="journey_date" value={form.journey_date} onChange={onFormChange} required style={inputStyle} disabled={disabled} />
-        </div>
-        <div>
-          <label style={labelStyle}>From Station</label>
-          <input type="text" name="from_station" value={form.from_station} onChange={onFormChange} required style={inputStyle} disabled={disabled} />
-        </div>
-        <div>
-          <label style={labelStyle}>To Station</label>
-          <input type="text" name="to_station" value={form.to_station} onChange={onFormChange} required style={inputStyle} disabled={disabled} />
-        </div>
-        <div>
-          <label style={labelStyle}>Passenger Name</label>
-          <input type="text" name="passenger_name" value={form.passenger_name} onChange={onFormChange} required style={inputStyle} disabled={disabled} />
-        </div>
-        <div>
-          <label style={labelStyle}>Age</label>
-          <input type="number" name="passenger_age" min={1} max={120} value={form.passenger_age} onChange={onFormChange} required style={inputStyle} disabled={disabled} />
-        </div>
-        <div>
-          <label style={labelStyle}>Sex</label>
-          <select name="passenger_sex" value={form.passenger_sex} onChange={onFormChange} required style={inputStyle} disabled={disabled}>
-            <option value="">Select...</option>
-            <option value="M">Male</option>
-            <option value="F">Female</option>
-            <option value="O">Other</option>
-          </select>
-        </div>
+      <h2 style={{ fontWeight: 700, fontSize: 22, marginBottom: 18, color: "#1a3365" }}>Register to Book</h2>
+      <div style={{ marginBottom: 14 }}>
+        <label style={labelStyle}>Full Name</label>
+        <input name="full_name" type="text" required value={registrationForm.full_name} onChange={handleChange} style={inputStyle} autoFocus />
       </div>
-      <div style={{ marginTop: 12, display: "flex", gap: 12 }}>
-        <button
-          type="submit"
-          className="btn btn-large"
-          disabled={disabled}
-          style={{
-            background: COLORS.primary,
-            color: "#fff",
-            border: "none",
-            borderRadius: 6,
-            fontWeight: 700,
-            fontSize: 18,
-            padding: "10px 34px",
-            cursor: disabled ? "not-allowed" : "pointer",
-            transition: "opacity 0.3s",
-            boxShadow: "0 1px 4px rgba(0,0,0,0.1)",
-            opacity: disabled ? 0.7 : 1
-          }}
-        >Book Now</button>
-        <button
-          type="button"
-          className="btn"
-          onClick={resetForm}
-          style={{
-            background: "#eee",
-            color: COLORS.primary,
-            border: "1px solid #bbb",
-            borderRadius: 6,
-            padding: "10px 18px"
-          }}
-          disabled={disabled}
-        >Reset</button>
+      <div style={{ marginBottom: 14 }}>
+        <label style={labelStyle}>Age</label>
+        <input name="age" type="number" min={1} max={120} required value={registrationForm.age} onChange={handleChange} style={inputStyle} />
       </div>
+      <div style={{ marginBottom: 14 }}>
+        <label style={labelStyle}>Address</label>
+        <input name="address" type="text" required value={registrationForm.address} onChange={handleChange} style={inputStyle} />
+      </div>
+      <div style={{ marginBottom: 14 }}>
+        <label style={labelStyle}>Preferred Berth</label>
+        <select name="preferred_berth" required value={registrationForm.preferred_berth} onChange={handleChange} style={inputStyle}>
+          <option value="">Select...</option>
+          <option value="Lower">Lower</option>
+          <option value="Middle">Middle</option>
+          <option value="Upper">Upper</option>
+          <option value="Side Lower">Side Lower</option>
+          <option value="Side Upper">Side Upper</option>
+        </select>
+      </div>
+      <div style={{ marginBottom: 18 }}>
+        <label style={labelStyle}>Phone</label>
+        <input name="phone" type="text" required value={registrationForm.phone} onChange={handleChange} style={inputStyle} />
+      </div>
+      <button type="submit" className="btn btn-large" style={{
+        background: "#ffab00",
+        color: "#212121",
+        border: "none",
+        borderRadius: 6,
+        fontWeight: 700,
+        fontSize: 18,
+        padding: "12px 32px",
+        width: "100%",
+        cursor: "pointer",
+        marginTop: 10
+      }}>Register &nbsp;→</button>
     </form>
   );
 }
 
-/** PUBLIC_INTERFACE
- * Shows booking/payment status and guides user through steps
+/**
+ * PUBLIC_INTERFACE
+ * Booking form (only after registration)
+ * Fields: from, to, date, preferred_berth
  */
-function StatusCard({ bookingStatus, paymentStatus, paymentLink, onMockPayment, bookingId }) {
+function BookingForm({ bookingForm, setBookingForm, onSubmit }) {
+  function handleChange(e) {
+    const { name, value } = e.target;
+    setBookingForm((prev) => ({ ...prev, [name]: value }));
+  }
+  return (
+    <form onSubmit={onSubmit} style={{
+      background: "var(--bg-secondary)",
+      borderRadius: 8,
+      padding: "1rem 1rem",
+      marginBottom: 20,
+      boxShadow: "0 2px 8px rgba(30,20,50,0.05)"
+    }}>
+      <h2 style={{ fontWeight: 700, fontSize: 20, marginBottom: 18, color: "#1a3365" }}>Book Ticket</h2>
+      <div style={{ marginBottom: 14 }}>
+        <label style={labelStyle}>Source (From)</label>
+        <input name="from" type="text" required value={bookingForm.from} onChange={handleChange} style={inputStyle} />
+      </div>
+      <div style={{ marginBottom: 14 }}>
+        <label style={labelStyle}>Destination (To)</label>
+        <input name="to" type="text" required value={bookingForm.to} onChange={handleChange} style={inputStyle} />
+      </div>
+      <div style={{ marginBottom: 14 }}>
+        <label style={labelStyle}>Journey Date</label>
+        <input name="journey_date" type="date" required value={bookingForm.journey_date} onChange={handleChange} style={inputStyle} />
+      </div>
+      <div style={{ marginBottom: 18 }}>
+        <label style={labelStyle}>Preferred Berth</label>
+        <select name="preferred_berth" required value={bookingForm.preferred_berth} onChange={handleChange} style={inputStyle}>
+          <option value="">Select...</option>
+          <option value="Lower">Lower</option>
+          <option value="Middle">Middle</option>
+          <option value="Upper">Upper</option>
+          <option value="Side Lower">Side Lower</option>
+          <option value="Side Upper">Side Upper</option>
+        </select>
+      </div>
+      <button type="submit" className="btn btn-large" style={{
+        background: COLORS.primary,
+        color: "#fff",
+        border: "none",
+        borderRadius: 6,
+        fontWeight: 700,
+        fontSize: 18,
+        padding: "12px 32px",
+        width: "100%",
+        cursor: "pointer",
+        marginTop: 6
+      }}>Book Now</button>
+    </form>
+  );
+}
+
+/**
+ * PUBLIC_INTERFACE
+ * Profile summary, wallet, and reset/deposit actions
+ */
+function ProfileCard({ userProfile, wallet, onReset, onDeposit }) {
+  return (
+    <div style={{
+      background: "#e3f2fd",
+      borderRadius: 10,
+      padding: "24px 20px",
+      marginBottom: 18,
+      boxShadow: "0 2px 8px rgba(30,60,150,0.06)",
+      color: "#1a3365",
+      position: "relative"
+    }}>
+      <div style={{
+        fontWeight: 700, fontSize: 19, marginBottom: 10, letterSpacing: 1
+      }}>
+        Welcome, {userProfile.full_name}
+      </div>
+      <div style={{ fontSize: 14, marginBottom: 6 }}>
+        Age: {userProfile.age} &nbsp;|&nbsp; Address: {userProfile.address}
+      </div>
+      <div style={{ fontSize: 14, marginBottom: 6 }}>
+        Preferred Berth: <b>{userProfile.preferred_berth}</b> &nbsp;|&nbsp; Phone: {userProfile.phone}
+      </div>
+      <div style={{ fontSize: 15, marginBottom: 10, fontWeight: 600 }}>
+        💰 Wallet Balance: <span style={{ color: COLORS.primary }}>₹{wallet.toFixed(2)}</span>
+        <button onClick={() => onDeposit(500)} style={{
+          marginLeft: 14,
+          background: COLORS.accent,
+          border: "none",
+          borderRadius: 6,
+          color: "#212121",
+          fontWeight: 700,
+          padding: "5px 15px",
+          cursor: "pointer"
+        }}>Deposit ₹500</button>
+      </div>
+      <button onClick={onReset} style={{
+        position: "absolute", top: 15, right: 14,
+        background: "#fff3e0", color: "#c62828",
+        border: "1px solid #bbb", borderRadius: 6,
+        fontWeight: 700, fontSize: 12, padding: "4px 10px", cursor: "pointer"
+      }}>Logout</button>
+    </div>
+  );
+}
+
+/**
+ * PUBLIC_INTERFACE
+ * Booking/payment status, guides user through steps
+ */
+function StatusCard({ bookingStatus, paymentStatus, booking, wallet, onDeposit, onQuickPay }) {
   if (!bookingStatus) return null;
   let message = "";
   let cardColor = "#f5f5f5";
+  let action = null;
 
-  if (["initiated", "initiating", "checking"].includes(bookingStatus)) {
+  if (["initiating"].includes(bookingStatus)) {
     message = "Booking is being processed. Please wait...";
     cardColor = "#fffde7";
-  } else if (bookingStatus === "payment_pending") {
-    message = "Booking is pending payment. Complete your payment to confirm.";
-    cardColor = "#fff3e0";
+  } else if (bookingStatus === "initiated") {
+    if (wallet < 500) {
+      message = "Booking ready. Insufficient wallet balance for Quick Pay.";
+      cardColor = "#ffe0b2";
+      action = <button style={{ ...inputStyle, background: COLORS.accent, color: "#222", fontWeight: 700, marginTop: 10 }} onClick={() => onDeposit(500)}>Deposit ₹500</button>;
+    } else {
+      message = "Booking ready. Use Quick Pay to auto-debit and confirm!";
+      cardColor = "#e3f2fd";
+      action = <button style={{ ...inputStyle, background: COLORS.success, color: "#fff", fontWeight: 700, marginTop: 10 }} onClick={onQuickPay}>Pay Now & QuickBook</button>;
+    }
   } else if (bookingStatus === "booked") {
-    message = "Your ticket is booked! Check your profile/email for PNR details.";
+    message = "✅ Your ticket is booked! Enjoy your journey!";
     cardColor = "#e8f5e9";
   } else if (bookingStatus === "failed" || bookingStatus === "cancelled") {
     message = "Booking failed or was cancelled. Please try again.";
@@ -555,39 +533,10 @@ function StatusCard({ bookingStatus, paymentStatus, paymentLink, onMockPayment, 
         {statusEmoji(bookingStatus)}
       </span>
       {message}
-      {bookingStatus === "payment_pending" && (
-        <div style={{ marginTop: 16 }}>
-          {paymentLink ?
-            <a href={paymentLink} target="_blank" rel="noreferrer" style={{
-              background: COLORS.accent,
-              color: COLORS.primary,
-              padding: "10px 22px",
-              borderRadius: 6,
-              fontWeight: 600,
-              textDecoration: "none",
-              boxShadow: "0 1px 4px rgba(0,0,0,0.07)"
-            }}>
-              Pay Now (Demo Link)
-            </a>
-            : <span>Generating payment link...</span>
-          }
-          <button onClick={onMockPayment} style={{
-            marginLeft: 18,
-            background: COLORS.success,
-            color: "#fff",
-            border: "none",
-            borderRadius: 6,
-            padding: "8px 18px",
-            cursor: "pointer",
-            fontWeight: 700
-          }}>
-            Simulate Payment Success
-          </button>
-        </div>
-      )}
-      {bookingId && (
+      {action}
+      {booking && booking.booking_id && (
         <div style={{ fontSize: 13, color: "#777", marginTop: 12 }}>
-          Booking ID: {bookingId}
+          Booking ID: {booking.booking_id}
         </div>
       )}
     </div>
@@ -596,9 +545,8 @@ function StatusCard({ bookingStatus, paymentStatus, paymentLink, onMockPayment, 
 
 function statusEmoji(status) {
   switch (status) {
-    case "initiated":
-    case "initiating": return "⏳";
-    case "checking": return "🔄";
+    case "initiated": return "⏳";
+    case "initiating": return "🔄";
     case "payment_pending": return "💳";
     case "booked": return "✅";
     case "failed":
@@ -607,7 +555,7 @@ function statusEmoji(status) {
   }
 }
 
-// Styles for quick input re-use
+// Input and label styles
 const inputStyle = {
   width: "100%",
   padding: "8px 10px",
@@ -615,13 +563,13 @@ const inputStyle = {
   borderRadius: 5,
   border: "1px solid #b0b0b0",
   fontSize: 15,
-  background: "#fff"
+  background: "#fff",
 };
 const labelStyle = {
   fontSize: 13,
   fontWeight: 500,
   color: "#384850",
-  marginBottom: 4
+  marginBottom: 4,
 };
 
 export default App;
