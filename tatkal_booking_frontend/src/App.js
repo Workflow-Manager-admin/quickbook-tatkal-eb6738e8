@@ -2,8 +2,18 @@ import React, { useState, useEffect } from "react";
 import "./App.css";
 import Wallet from "./Wallet";
 
-// Backend API base URL (adjust if proxying in development)
-const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:3001/api";
+/**
+ * Backend API base URL for Django backend endpoints.
+ * - Uses env variable REACT_APP_API_BASE, else defaults to http(s)://<host>/api for cloud, or localhost:8000/api for local dev.
+ * - Use a proxy in package.json or REACT_APP_API_BASE for local requests to avoid CORS issues if needed.
+ */
+const API_BASE =
+  process.env.REACT_APP_API_BASE ||
+  // Prefer window.location.origin + "/api" for deployments
+  (window && window.location && window.location.origin
+    ? window.location.origin + "/api"
+    : "http://localhost:8000/api");
+// -> Examples: "http://localhost:8000/api", "https://mydomain/api"
 
 // Color theme for inline styles if needed
 const COLORS = {
@@ -14,7 +24,17 @@ const COLORS = {
   success: "#388e3c",
 };
 
-function apiFetch(endpoint, { method = "GET", body, headers = {} } = {}) {
+/**
+ * PUBLIC_INTERFACE
+ * Helper for all Django backend REST API calls.
+ * - Handles network/server errors and non-2xx responses.
+ * - Returns response body (parsed as JSON if possible).
+ * - Throws an error on HTTP/network failure.
+ * - Usage:
+ *    apiFetch("/user_profiles/", { method: "GET" });
+ *    apiFetch("/user_profiles/", { method: "POST", body: {...} });
+ */
+async function apiFetch(endpoint, { method = "GET", body, headers = {} } = {}) {
   let opts = {
     method,
     headers: {
@@ -23,14 +43,32 @@ function apiFetch(endpoint, { method = "GET", body, headers = {} } = {}) {
     },
   };
   if (body) opts.body = JSON.stringify(body);
-  return fetch(`${API_BASE}${endpoint}`, opts).then(async (res) => {
-    const contentType = res.headers.get("content-type");
-    if (!res.ok) throw new Error(await res.text());
-    if (contentType && contentType.indexOf("application/json") !== -1) {
-      return await res.json();
-    }
-    return await res.text();
-  });
+  let apiUrl = API_BASE + endpoint;
+  let response;
+  try {
+    response = await fetch(apiUrl, opts);
+  } catch (err) {
+    throw new Error(
+      "Cannot connect to the server. Please check your network or try again later."
+    );
+  }
+  const contentType = response.headers.get("content-type");
+  let parsed;
+  if (contentType && contentType.indexOf("application/json") !== -1) {
+    parsed = await response.json();
+  } else {
+    parsed = await response.text();
+  }
+  if (!response.ok) {
+    const errorMsg =
+      typeof parsed === "string"
+        ? parsed
+        : parsed && parsed.error
+        ? parsed.error
+        : response.statusText || "API Error";
+    throw new Error("API error: " + errorMsg);
+  }
+  return parsed;
 }
 
 /**
@@ -79,13 +117,33 @@ function App() {
       setRegistered(true);
       setWallet(Number(localStorage.getItem("tatkal_wallet") || 0));
     }
+    // Future: Optionally refetchWallet();
+    // Future: Optionally fetchBookingsForUser();
   }, []);
 
+  /**
+   * Fetch all user profiles from backend (GET /user_profiles/)
+   * Used for admin/testing/demo. Caller sets profiles array.
+   */
   function fetchProfiles() {
     apiFetch("/user_profiles/")
       .then((result) => setProfiles(Array.isArray(result) ? result : []))
       .catch(() => setProfiles([]));
   }
+
+  /**
+   * Example: Fetch logged-in user's bookings by GET /get_bookings/{user_id}/
+   * Usage: Call after registration/booking/payment to update booking history.
+   * See OpenAPI for available endpoints for fetching profiles, bookings, user by ID.
+   * 
+   * async function fetchUserBookings() {
+   *   if (!userProfile || !userProfile.id) return;
+   *   try {
+   *     const bookings = await apiFetch(`/get_bookings/${userProfile.id}/`);
+   *     // setUserBookings(bookings);
+   *   } catch (err) { ... }
+   * }
+   */
 
   // Registration submit
   // PUBLIC_INTERFACE
@@ -145,19 +203,17 @@ function App() {
     };
 
     try {
-      // Backend expects POST /bookings/ (no train_no!)
-      const bookingRes = await apiFetch("/bookings/", {
+      // Backend expects POST /create_booking/ for booking with auto-wallet debit
+      // Payload: all booking fields + user_profile_id (no train_no required, let backend compute fare)
+      const bookingRes = await apiFetch("/create_booking/", {
         method: "POST",
         body: payload,
       });
       setBooking(bookingRes);
       setBookingStatus("initiated");
-      if (wallet < 500) {
-        setPaymentStatus("insufficient_wallet");
-        setError("Insufficient wallet balance. Please deposit.");
-      } else {
-        setTimeout(() => handleQuickPay(bookingRes), 800);
-      }
+      // (Assume backend handles payment/deduction if wallet sufficient; else error)
+      // Optionally, refetch wallet after booking to stay in sync
+      // *Frontend does not need to do separate wallet logic: backend ensures debit
     } catch (err) {
       setError("Booking failed: " + String(err));
       setBookingStatus("failed");
@@ -165,11 +221,32 @@ function App() {
   }
 
   // PUBLIC_INTERFACE
-  // Handle wallet deposit
-  function handleDeposit(amt) {
-    const newWallet = wallet + amt;
-    setWallet(newWallet);
-    localStorage.setItem("tatkal_wallet", String(newWallet));
+  /**
+   * Handle wallet deposit (integrated with backend)
+   * Calls POST /deposit_wallet/ on Django backend with {"user_id", "amount"}
+   * Updates local wallet only after backend confirms success.
+   */
+  async function handleDeposit(amt) {
+    setError(null);
+    if (!userProfile || !userProfile.id) {
+      setError("User profile not loaded.");
+      return;
+    }
+    try {
+      await apiFetch("/deposit_wallet/", {
+        method: "POST",
+        body: {
+          user_id: userProfile.id,
+          amount: amt,
+        },
+      });
+      // Also update local UI value (backend is authoritative)
+      const newWallet = wallet + amt;
+      setWallet(newWallet);
+      localStorage.setItem("tatkal_wallet", String(newWallet));
+    } catch (err) {
+      setError("Wallet deposit failed: " + String(err));
+    }
   }
 
   // PUBLIC_INTERFACE
@@ -560,5 +637,31 @@ const labelStyle = {
   color: "#384850",
   marginBottom: 4,
 };
+
+/**
+ * 
+ * === API Integration Reference ===
+ * - User Registration/Profile Creation:
+ *    POST /user_profiles/      {username, password, full_name, ...}   --> creates profile and returns profile object
+ * - Fetch All Profiles:
+ *    GET /user_profiles/       []                                     --> array of profile objects
+ * - Wallet Deposit:
+ *    POST /deposit_wallet/     {user_id, amount}                      --> adjusts wallet balance
+ * - Booking Creation/Auto Debit:
+ *    POST /create_booking/     {user_profile_id, ...booking fields}   --> creates booking, debits wallet if sufficient
+ * - Get All Bookings for User:
+ *    GET /get_bookings/{user_id}/     --> returns array of bookings
+ * - Get Single User Profile by ID:
+ *    GET /user_profiles/{user_id}/    --> single profile object
+ * - See backend OpenAPI spec for optional: booking cancel, payment status, etc.
+ * 
+ * === API_BASE Notes ===
+ * - Uses REACT_APP_API_BASE or window.location.origin + "/api" for portability.
+ * - For local dev on port 3000 with Django on 8000, setup a proxy or set REACT_APP_API_BASE in .env.
+ * 
+ * === Error Handling Strategy ===
+ * - All requests handle network/connection/server errors and set a visible error in UI.
+ * 
+ */
 
 export default App;
