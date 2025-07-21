@@ -1,0 +1,4 @@
+{
+    "command": "npm install && npx tsc --noEmit && npm test -- --ci",
+    "working_directory": "/home/kavia/workspace/code-generation/quickbook-tatkal-eb6738e8/tatkal_booking_frontend"
+}
