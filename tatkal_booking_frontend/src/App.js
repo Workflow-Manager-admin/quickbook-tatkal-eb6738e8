@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import "./App.css";
+import Wallet from "./Wallet";
 
 // Backend API base URL (adjust if proxying in development)
 const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:3001/api";
@@ -464,19 +465,7 @@ function ProfileCard({ userProfile, wallet, onReset, onDeposit }) {
       <div style={{ fontSize: 14, marginBottom: 6 }}>
         Preferred Berth: <b>{userProfile.preferred_berth}</b> &nbsp;|&nbsp; Phone: {userProfile.phone}
       </div>
-      <div style={{ fontSize: 15, marginBottom: 10, fontWeight: 600 }}>
-        💰 Wallet Balance: <span style={{ color: COLORS.primary }}>₹{wallet.toFixed(2)}</span>
-        <button onClick={() => onDeposit(500)} style={{
-          marginLeft: 14,
-          background: COLORS.accent,
-          border: "none",
-          borderRadius: 6,
-          color: "#212121",
-          fontWeight: 700,
-          padding: "5px 15px",
-          cursor: "pointer"
-        }}>Deposit ₹500</button>
-      </div>
+      <Wallet wallet={wallet} onDeposit={onDeposit} style={{marginTop: 10, marginBottom: 0}} />
       <button onClick={onReset} style={{
         position: "absolute", top: 15, right: 14,
         background: "#fff3e0", color: "#c62828",
