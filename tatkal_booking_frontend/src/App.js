@@ -147,6 +147,12 @@ function App() {
 
   // Registration submit
   // PUBLIC_INTERFACE
+  /**
+   * NOTE: Registration API expects the backend to have /api/user_profiles/ POST enabled.
+   * If you receive "Cannot POST /api/user_profiles/", ensure your Django backend's urls.py
+   * mounts this endpoint under the /api/ prefix as per the OpenAPI spec.
+   * See backend/interfaces/openapi.json for endpoint details.
+   */
   async function handleRegistration(e) {
     e.preventDefault();
     setError(null);
